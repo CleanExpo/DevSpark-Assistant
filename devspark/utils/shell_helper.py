@@ -78,33 +78,165 @@ class ShellHelper:
         """Get example commands for the current shell."""
         if self._is_powershell:
             return {
+                # File Operations
                 'create_dir': 'New-Item -ItemType Directory -Path',
                 'remove_dir': 'Remove-Item -Recurse -Force',
                 'copy': 'Copy-Item',
                 'move': 'Move-Item',
+                'rename': 'Rename-Item',
+                'list_dir': 'Get-ChildItem',
+                'read_file': 'Get-Content',
+                'write_file': 'Set-Content',
+                'append_file': 'Add-Content',
+                'find_files': 'Get-ChildItem -Recurse -Filter',
+                'file_exists': 'Test-Path',
+                
+                # Process Management
+                'list_processes': 'Get-Process',
+                'kill_process': 'Stop-Process -Id',
+                'start_process': 'Start-Process',
+                'background_job': 'Start-Job -ScriptBlock { }',
+                
+                # Environment and System
                 'set_env': '$env:VARIABLE="value"',
+                'get_env': '$env:VARIABLE',
+                'current_dir': '$PWD',
+                'change_dir': 'Set-Location',
+                'system_info': 'Get-ComputerInfo',
+                
+                # Network
+                'test_connection': 'Test-NetConnection',
+                'get_ip': 'Get-NetIPAddress',
+                'download_file': 'Invoke-WebRequest -Uri',
+                
+                # Redirections and Pipes
                 'pipe': '|',
                 'null_redirect': '$null',
+                'error_redirect': '2>&1',
+                'output_redirect': '>',
+                'append_redirect': '>>',
+                
+                # Compression
+                'compress': 'Compress-Archive -Path',
+                'extract': 'Expand-Archive -Path',
+                
+                # String Operations
+                'grep': 'Select-String -Pattern',
+                'replace_text': '($content -replace "old", "new")',
+                
+                # Git Specific
+                'git_init': 'git init',
+                'git_clone': 'git clone',
+                'git_add': 'git add',
+                'git_commit': 'git commit -m'
             }
         elif self._is_cmd:
             return {
+                # File Operations
                 'create_dir': 'mkdir',
                 'remove_dir': 'rmdir /s /q',
                 'copy': 'copy',
                 'move': 'move',
+                'rename': 'ren',
+                'list_dir': 'dir',
+                'read_file': 'type',
+                'write_file': 'echo content >',
+                'append_file': 'echo content >>',
+                'find_files': 'dir /s /b',
+                'file_exists': 'if exist',
+                
+                # Process Management
+                'list_processes': 'tasklist',
+                'kill_process': 'taskkill /PID',
+                'start_process': 'start',
+                'background_job': 'start /b',
+                
+                # Environment and System
                 'set_env': 'set VARIABLE=value',
+                'get_env': 'echo %VARIABLE%',
+                'current_dir': 'cd',
+                'change_dir': 'cd',
+                'system_info': 'systeminfo',
+                
+                # Network
+                'test_connection': 'ping',
+                'get_ip': 'ipconfig',
+                'download_file': 'curl -O',
+                
+                # Redirections and Pipes
                 'pipe': '|',
                 'null_redirect': 'NUL',
+                'error_redirect': '2>&1',
+                'output_redirect': '>',
+                'append_redirect': '>>',
+                
+                # Compression
+                'compress': 'compact /c',
+                'extract': 'expand',
+                
+                # String Operations
+                'grep': 'findstr',
+                'replace_text': 'for /f "tokens=*" %i in (file) do (echo %i | findstr /v "old" || echo %i | sed "s/old/new/")',
+                
+                # Git Specific
+                'git_init': 'git init',
+                'git_clone': 'git clone',
+                'git_add': 'git add',
+                'git_commit': 'git commit -m'
             }
         else:
             return {
+                # File Operations
                 'create_dir': 'mkdir -p',
                 'remove_dir': 'rm -rf',
                 'copy': 'cp',
                 'move': 'mv',
+                'rename': 'mv',
+                'list_dir': 'ls',
+                'read_file': 'cat',
+                'write_file': 'echo content >',
+                'append_file': 'echo content >>',
+                'find_files': 'find . -name',
+                'file_exists': 'test -f',
+                
+                # Process Management
+                'list_processes': 'ps aux',
+                'kill_process': 'kill',
+                'start_process': 'nohup',
+                'background_job': '&',
+                
+                # Environment and System
                 'set_env': 'export VARIABLE=value',
+                'get_env': 'echo $VARIABLE',
+                'current_dir': 'pwd',
+                'change_dir': 'cd',
+                'system_info': 'uname -a',
+                
+                # Network
+                'test_connection': 'ping -c 4',
+                'get_ip': 'ip addr',
+                'download_file': 'wget',
+                
+                # Redirections and Pipes
                 'pipe': '|',
                 'null_redirect': '/dev/null',
+                'error_redirect': '2>&1',
+                'output_redirect': '>',
+                'append_redirect': '>>',
+                
+                # Compression
+                'compress': 'tar -czf',
+                'extract': 'tar -xzf',
+                
+                # String Operations
+                'grep': 'grep',
+                'replace_text': "sed 's/old/new/g'",
+                
+                # Git Specific
+                'git_init': 'git init',
+                'git_clone': 'git clone',
+                'git_add': 'git add',
+                'git_commit': 'git commit -m'
             }
 
 # Create a global instance for easy access
