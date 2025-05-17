@@ -5,7 +5,7 @@ Handles project structure generation and file creation
 
 import os
 import pathlib
-from typing import Dict, Any
+from typing import Dict, Any, List
 from ..utils.shell_helper import shell
 
 def create_project_structure(base_path: str, project_name: str, structure_suggestions: Dict[str, Any]) -> None:
@@ -18,45 +18,61 @@ def create_project_structure(base_path: str, project_name: str, structure_sugges
         structure_suggestions: Dictionary containing directory structure and file content suggestions
     """
     try:
+        # Ensure structure_suggestions is a dictionary
+        if not isinstance(structure_suggestions, dict):
+            raise ValueError("structure_suggestions must be a dictionary")
+            
         # Create project root directory
         project_root = os.path.join(base_path, project_name)
         os.makedirs(project_root, exist_ok=True)
         
-        # Create directory structure
-        for dir_path in structure_suggestions.get("directory_structure", []):
-            full_path = os.path.join(project_root, dir_path)
-            os.makedirs(full_path, exist_ok=True)
+        # Handle root level files
+        if "files" in structure_suggestions:
+            for file_info in structure_suggestions["files"]:
+                file_path = os.path.join(project_root, file_info["path"])
+                content = file_info.get("content", "")
+                
+                # Ensure parent directory exists
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                
+                # Write file content
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(content)
         
-        # Create files with content
-        for file_path, content in structure_suggestions.get("files_to_create", {}).items():
-            full_path = os.path.join(project_root, file_path)
-            # Ensure parent directory exists
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            
-            # Write file content using shell helper
-            if shell._is_powershell:
-                write_cmd = f"""
-                Set-Content -Path "{full_path}" -Value @"
-                {content}
-                "@
-                """
-            else:
-                write_cmd = f"""
-                echo '{content}' > "{full_path}"
-                """
-            
-            shell.execute_command(write_cmd)
+        # Handle directories and their files
+        if "directories" in structure_suggestions:
+            for dir_info in structure_suggestions["directories"]:
+                dir_path = os.path.join(project_root, dir_info["path"])
+                os.makedirs(dir_path, exist_ok=True)
+                
+                # Handle files inside this directory
+                if "files" in dir_info:
+                    for file_info in dir_info["files"]:
+                        file_path = os.path.join(dir_path, file_info["path"])
+                        content = file_info.get("content", "")
+                        
+                        # Ensure parent directory exists (for nested files)
+                        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                        
+                        # Write file content
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write(content)
         
-        # Initialize git repository if not already initialized
-        git_dir = os.path.join(project_root, ".git")
-        if not os.path.exists(git_dir):
-            commands = [
-                f"cd {project_root}",
-                "git init",
-                "git add .",
-                'git commit -m "Initial commit: Project scaffolding"'
-            ]
-            shell.execute_command(shell.join_commands(commands))
+        # Handle old format for backward compatibility
+        if "directory_structure" in structure_suggestions:
+            for dir_path in structure_suggestions["directory_structure"]:
+                full_path = os.path.join(project_root, dir_path)
+                os.makedirs(full_path, exist_ok=True)
+        
+        if "files_to_create" in structure_suggestions:
+            for file_path, content in structure_suggestions["files_to_create"].items():
+                full_path = os.path.join(project_root, file_path)
+                # Ensure parent directory exists
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                
+                # Write file content
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(content)
             
     except Exception as e:
         raise Exception(f"Failed to create project structure: {str(e)}")
@@ -84,28 +100,15 @@ def update_project_structure(project_path: str, structure_updates: Dict[str, Any
             # Check if file exists and should be updated
             if os.path.exists(full_path):
                 # Read existing content
-                if shell._is_powershell:
-                    read_cmd = f'Get-Content -Path "{full_path}" -Raw'
-                else:
-                    read_cmd = f'cat "{full_path}"'
+                with open(full_path, "r", encoding="utf-8") as f:
+                    existing_content = f.read()
                 
-                exit_code, stdout, stderr = shell.execute_command(read_cmd)
-                if exit_code == 0 and stdout.strip() == content.strip():
+                if existing_content.strip() == content.strip():
                     continue  # Skip if content is the same
             
             # Write/update file content
-            if shell._is_powershell:
-                write_cmd = f"""
-                Set-Content -Path "{full_path}" -Value @"
-                {content}
-                "@
-                """
-            else:
-                write_cmd = f"""
-                echo '{content}' > "{full_path}"
-                """
-            
-            shell.execute_command(write_cmd)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
             
     except Exception as e:
         raise Exception(f"Failed to update project structure: {str(e)}")
