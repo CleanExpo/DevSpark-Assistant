@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 import os
 import pathlib # For path operations
 import json # For pretty printing dicts
+from .utils import shell
 
 # Load environment variables from .env file at the earliest opportunity
 # This should be called before other modules that might need the env vars are imported
@@ -111,9 +112,25 @@ def init():
             structure_suggestions=suggestions
         )
         typer.secho(f"\nProject '{project_name}' successfully scaffolded in '{pathlib.Path(base_creation_path) / project_name}'!", fg=typer.colors.GREEN) # Emoji removed
-        typer.echo("Next steps: cd into your new project directory and start coding!")
-    except typer.Exit: # Catch exits from project_generator if it uses typer.Exit
-        raise
+        
+        # Initialize git repository if requested
+        if typer.confirm("\nWould you like to initialize a Git repository?", default=True):
+            project_path = os.path.join(base_creation_path, project_name)
+            commands = [
+                f"cd {project_path}",
+                "git init",
+                "git add .",
+                'git commit -m "Initial commit: Project scaffolding"'
+            ]
+            command = shell.join_commands(commands)
+            exit_code, stdout, stderr = shell.execute_command(command)
+            if exit_code == 0:
+                typer.secho("Git repository initialized successfully!", fg=typer.colors.GREEN)
+            else:
+                typer.secho(f"Error initializing Git repository: {stderr}", fg=typer.colors.RED)
+        
+        typer.echo(f"\nNext steps: cd into '{project_name}' and start coding!")
+        
     except Exception as e:
         typer.secho(f"An error occurred during project generation: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
