@@ -1,0 +1,9 @@
+﻿# For interacting with LLM APIs
+google-generativeai>=0.3.0
+openai>=1.0.0 # For OpenAI models (optional, if you want to support it)
+
+# For creating a user-friendly Command Line Interface
+typer>=0.9.0
+
+# For loading environment variables (like API keys) from .env files
+python-dotenv>=1.0.0
