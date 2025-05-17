@@ -11,6 +11,7 @@ This module will handle:
 import os
 import json # For parsing LLM JSON responses
 import typer # Temporary for user feedback, ideally errors are bubbled up
+from typing import Dict, Optional, Any
 try:
     import google.generativeai as genai
 except ImportError:
@@ -21,6 +22,11 @@ except ImportError:
 
 # Example: If using OpenAI
 # import openai
+
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 def get_llm_api_key(service_name: str = "GOOGLE"):
     """
@@ -38,17 +44,24 @@ def get_llm_api_key(service_name: str = "GOOGLE"):
         # Placeholder for other services or error handling
         return None
 
-def get_scaffolding_suggestions(project_details: dict) -> dict:
+def setup_llm():
+    """Setup LLM client based on available API keys."""
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY not found in environment variables")
+    
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel('gemini-pro')
+
+def get_scaffolding_suggestions(project_details: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Queries the LLM to get project scaffolding suggestions.
-
+    Get project scaffolding suggestions from LLM.
+    
     Args:
-        project_details (dict): A dictionary containing details about the project
-                                (name, type, language, frameworks, etc.).
-
+        project_details: Dictionary containing project information
+        
     Returns:
-        dict: A dictionary containing LLM suggestions (e.g., directory structure,
-              file names, basic config content).
+        Dictionary containing suggested project structure and files
     """
     if not genai:
         return {"error": "'google-generativeai' package is required for this feature."}
@@ -59,48 +72,44 @@ def get_scaffolding_suggestions(project_details: dict) -> dict:
 
     try:
         genai.configure(api_key=api_key)
-        generation_config = {
-            "temperature": 0.7, # Adjust for creativity vs. predictability
-            "top_p": 1,
-            "top_k": 1,
-            "max_output_tokens": 2048, # Adjust as needed
-        }
-
         model = genai.GenerativeModel(
             model_name="gemini-1.5-flash-latest", # Or "gemini-pro" or other compatible model
-            generation_config=generation_config,
         )
 
-        prompt_parts = [
-            "You are an expert software development assistant specializing in project scaffolding.",
-            "Based on the following project details, please provide a clear and actionable scaffolding plan.",
-            f"Project Name: {project_details.get('name', 'N/A')}",
-            f"Project Type: {project_details.get('type', 'N/A')}",
-            f"Main Programming Language: {project_details.get('language', 'N/A')}",
-            "\nProvide the output as a JSON object with two main keys:",
-            "1. 'directory_structure': A list of strings, where each string is a relative path for a directory to be created (e.g., 'src', 'tests', 'src/components').",
-            "2. 'files_to_create': A JSON object where keys are relative file paths (e.g., 'src/main.py', 'README.md') and values are the suggested initial content for these files.",
-            "Keep file content concise and functional for a starter project.",
-            "Example for 'files_to_create': {\"README.md\": \"# Project Title\\nDescription...\", \"src/app.py\": \"print('Hello World')\"}",
-            "Ensure all paths are relative to the project root.",
-            "If suggesting a .gitignore, include common ignores for the specified language and also '.env', 'venv/', '.venv.'."
-        ]
-        prompt = "\n".join(prompt_parts)
-
+        prompt = f"""
+        Create a project structure for a {project_details['type']} project named {project_details['name']} 
+        using {project_details['language']} as the primary language.
+        
+        Provide the response in the following JSON format:
+        {{
+            "directory_structure": ["list", "of", "directories"],
+            "files_to_create": {{
+                "file/path": "file content",
+                "another/file": "content"
+            }}
+        }}
+        
+        Include:
+        - Standard project structure
+        - Configuration files
+        - Basic implementation files
+        - Test directory structure
+        - Documentation files
+        """
+        
         typer.echo("\n--- Sending prompt to LLM for scaffolding suggestions... ---")
-
         response = model.generate_content(prompt)
-
         typer.echo("--- Received response from LLM. ---")
 
         try:
-            clean_response_text = response.text.strip()
-            if clean_response_text.startswith("```json"):
-                clean_response_text = clean_response_text[7:]
-            if clean_response_text.endswith("```"):
-                clean_response_text = clean_response_text[:-3]
+            # Extract JSON from response
+            json_str = response.text.strip()
+            if json_str.startswith("```json"):
+                json_str = json_str.split("```json")[1]
+            if json_str.endswith("```"):
+                json_str = json_str.split("```")[0]
             
-            suggestions = json.loads(clean_response_text.strip())
+            suggestions = json.loads(json_str)
             if "directory_structure" not in suggestions or "files_to_create" not in suggestions:
                 typer.secho("LLM response received, but not in the expected JSON format.", fg=typer.colors.RED)
                 return {"error": "LLM response format error.", "raw_response": response.text}
@@ -121,16 +130,16 @@ def get_scaffolding_suggestions(project_details: dict) -> dict:
         typer.secho(f"ERROR: LLM API call failed: {e}", fg=typer.colors.RED)
         return {"error": f"LLM API call failed: {e}"}
 
-def review_config_file(file_content: str, file_type: str = "unknown") -> dict:
+def review_config_file(content: str, file_type: str) -> Dict[str, Any]:
     """
-    Queries the LLM to review a configuration file content.
-
+    Review configuration file using LLM.
+    
     Args:
-        file_content (str): The content of the configuration file.
-        file_type (str): The type of the configuration file (e.g., Dockerfile, package.json).
-
+        content: File content to review
+        file_type: Type of configuration file
+        
     Returns:
-        dict: A dictionary containing LLM review (e.g., suggestions, potential issues).
+        Dictionary containing review findings
     """
     if not genai:
         return {"error": "'google-generativeai' package is required for this feature."}
@@ -141,32 +150,40 @@ def review_config_file(file_content: str, file_type: str = "unknown") -> dict:
 
     try:
         genai.configure(api_key=api_key)
-        generation_config = {"temperature": 0.5, "max_output_tokens": 1024}
-        model = genai.GenerativeModel("gemini-1.5-flash-latest", generation_config=generation_config)
+        model = genai.GenerativeModel("gemini-1.5-flash-latest", generation_config={"temperature": 0.5, "max_output_tokens": 1024})
 
-        prompt_parts = [
-            f"You are an expert software development assistant. Please review the following configuration file (type: {file_type}).",
-            "Identify potential issues, suggest improvements, or highlight best practices.",
-            "Provide your review as a JSON object with keys like 'summary', 'suggestions' (a list of strings), and 'potential_issues' (a list of strings).",
-            "File content:",
-            "```" + file_type,
-            file_content,
-            "```"
-        ]
-        prompt = "\n".join(prompt_parts)
+        prompt = f"""
+        Review this {file_type} configuration file for best practices, security issues, and potential improvements:
+
+        {content}
+        
+        Provide the response in the following JSON format:
+        {{
+            "issues": [
+                {{"severity": "high|medium|low", "message": "description"}},
+            ],
+            "suggestions": [
+                "list of suggestions"
+            ],
+            "best_practices": [
+                "list of best practices being followed"
+            ]
+        }}
+        """
         
         typer.echo(f"\n--- Sending prompt to LLM for config review ({file_type})... ---")
         response = model.generate_content(prompt)
         typer.echo("--- Received response from LLM. ---")
 
         try:
-            clean_response_text = response.text.strip()
-            if clean_response_text.startswith("```json"):
-                clean_response_text = clean_response_text[7:]
-            if clean_response_text.endswith("```"):
-                clean_response_text = clean_response_text[:-3]
-
-            review = json.loads(clean_response_text.strip())
+            # Extract JSON from response
+            json_str = response.text.strip()
+            if json_str.startswith("```json"):
+                json_str = json_str.split("```json")[1]
+            if json_str.endswith("```"):
+                json_str = json_str.split("```")[0]
+            
+            review = json.loads(json_str)
             return review
         except json.JSONDecodeError:
             typer.secho("Failed to parse LLM config review response as JSON.", fg=typer.colors.RED)

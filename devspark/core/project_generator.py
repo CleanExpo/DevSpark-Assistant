@@ -1,68 +1,275 @@
 """
-Module for generating project structures based on LLM suggestions.
+Project Generator Module
+Handles project structure generation and file creation
 """
 
 import os
 import pathlib
-import typer
-from ..utils import shell
+from typing import Dict, Any
+from ..utils.shell_helper import shell
 
-def create_project_structure(base_path: str, project_name: str, structure_suggestions: dict) -> None:
+def create_project_structure(base_path: str, project_name: str, structure_suggestions: Dict[str, Any]) -> None:
     """
-    Creates a project structure based on the provided suggestions.
-
+    Creates a project structure based on LLM suggestions.
+    
     Args:
-        base_path (str): Base directory where the project should be created.
-        project_name (str): Name of the project (will be used as root directory name).
-        structure_suggestions (dict): Dictionary containing directory structure and file content suggestions.
+        base_path: Base directory where the project should be created
+        project_name: Name of the project (will be used as root directory name)
+        structure_suggestions: Dictionary containing directory structure and file content suggestions
     """
     try:
         # Create project root directory
         project_root = os.path.join(base_path, project_name)
-        typer.echo(f"\nAttempting to create project root at: {project_root}")
+        os.makedirs(project_root, exist_ok=True)
         
-        # Use shell helper to create directory
-        exit_code, _, stderr = shell.execute_command(
-            f"{shell.get_example_commands()['create_dir']} {project_root}",
-            cwd=base_path
-        )
-        if exit_code != 0:
-            typer.secho(f"Error creating project directory: {stderr}", fg=typer.colors.RED)
-            raise typer.Exit(code=1)
-        
-        typer.echo(f"\nSuccessfully created project directory: {project_root}")
-
         # Create directory structure
         for dir_path in structure_suggestions.get("directory_structure", []):
             full_path = os.path.join(project_root, dir_path)
-            try:
-                os.makedirs(full_path, exist_ok=True)
-                typer.echo(f"  Created directory: {full_path}")
-            except Exception as e:
-                typer.secho(f"Error creating directory {full_path}: {e}", fg=typer.colors.RED)
-                continue
-
+            os.makedirs(full_path, exist_ok=True)
+        
         # Create files with content
         for file_path, content in structure_suggestions.get("files_to_create", {}).items():
             full_path = os.path.join(project_root, file_path)
-            try:
-                # Ensure parent directory exists
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                
-                # Write file content
-                with open(full_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                typer.echo(f"  Created file: {full_path}")
-            except Exception as e:
-                typer.secho(f"Error creating file {full_path}: {e}", fg=typer.colors.RED)
-                continue
-
-        typer.echo(f"\nProject '{project_name}' structure generated successfully!")
-        typer.echo(f"Project created at: {project_root}")
-
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            
+            # Write file content using shell helper
+            if shell._is_powershell:
+                write_cmd = f"""
+                Set-Content -Path "{full_path}" -Value @"
+                {content}
+                "@
+                """
+            else:
+                write_cmd = f"""
+                echo '{content}' > "{full_path}"
+                """
+            
+            shell.execute_command(write_cmd)
+        
+        # Initialize git repository if not already initialized
+        git_dir = os.path.join(project_root, ".git")
+        if not os.path.exists(git_dir):
+            commands = [
+                f"cd {project_root}",
+                "git init",
+                "git add .",
+                'git commit -m "Initial commit: Project scaffolding"'
+            ]
+            shell.execute_command(shell.join_commands(commands))
+            
     except Exception as e:
-        typer.secho(f"An error occurred while creating project structure: {e}", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
+        raise Exception(f"Failed to create project structure: {str(e)}")
+
+def update_project_structure(project_path: str, structure_updates: Dict[str, Any]) -> None:
+    """
+    Updates an existing project structure with new files and directories.
+    
+    Args:
+        project_path: Path to the existing project
+        structure_updates: Dictionary containing new/updated structure and files
+    """
+    try:
+        # Create new directories
+        for dir_path in structure_updates.get("directory_structure", []):
+            full_path = os.path.join(project_path, dir_path)
+            os.makedirs(full_path, exist_ok=True)
+        
+        # Create/update files
+        for file_path, content in structure_updates.get("files_to_create", {}).items():
+            full_path = os.path.join(project_path, file_path)
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            
+            # Check if file exists and should be updated
+            if os.path.exists(full_path):
+                # Read existing content
+                if shell._is_powershell:
+                    read_cmd = f'Get-Content -Path "{full_path}" -Raw'
+                else:
+                    read_cmd = f'cat "{full_path}"'
+                
+                exit_code, stdout, stderr = shell.execute_command(read_cmd)
+                if exit_code == 0 and stdout.strip() == content.strip():
+                    continue  # Skip if content is the same
+            
+            # Write/update file content
+            if shell._is_powershell:
+                write_cmd = f"""
+                Set-Content -Path "{full_path}" -Value @"
+                {content}
+                "@
+                """
+            else:
+                write_cmd = f"""
+                echo '{content}' > "{full_path}"
+                """
+            
+            shell.execute_command(write_cmd)
+            
+    except Exception as e:
+        raise Exception(f"Failed to update project structure: {str(e)}")
+
+def generate_gitignore(project_path: str, language: str) -> None:
+    """
+    Generates a .gitignore file for the project.
+    
+    Args:
+        project_path: Path to the project
+        language: Programming language to generate gitignore for
+    """
+    try:
+        gitignore_path = os.path.join(project_path, ".gitignore")
+        
+        # Common patterns for all projects
+        common_patterns = [
+            ".env",
+            ".env.*",
+            "!.env.example",
+            "__pycache__/",
+            "*.py[cod]",
+            "*$py.class",
+            ".Python",
+            "build/",
+            "develop-eggs/",
+            "dist/",
+            "downloads/",
+            "eggs/",
+            ".eggs/",
+            "lib/",
+            "lib64/",
+            "parts/",
+            "sdist/",
+            "var/",
+            "wheels/",
+            "*.egg-info/",
+            ".installed.cfg",
+            "*.egg",
+            "MANIFEST",
+            ".env",
+            ".venv",
+            "env/",
+            "venv/",
+            "ENV/",
+            ".idea/",
+            ".vscode/",
+            "*.swp",
+            "*.swo",
+            ".DS_Store"
+        ]
+        
+        # Language-specific patterns
+        language_patterns = {
+            "python": [
+                "*.py[cod]",
+                "*$py.class",
+                "*.so",
+                ".Python",
+                "build/",
+                "develop-eggs/",
+                "dist/",
+                "downloads/",
+                "eggs/",
+                ".eggs/",
+                "lib/",
+                "lib64/",
+                "parts/",
+                "sdist/",
+                "var/",
+                "wheels/",
+                "*.egg-info/",
+                ".installed.cfg",
+                "*.egg",
+                "MANIFEST",
+                ".coverage",
+                "coverage.xml",
+                "*.cover",
+                ".pytest_cache/"
+            ],
+            "javascript": [
+                "node_modules/",
+                "npm-debug.log",
+                "yarn-debug.log*",
+                "yarn-error.log*",
+                ".pnpm-debug.log*",
+                ".env.local",
+                ".env.development.local",
+                ".env.test.local",
+                ".env.production.local",
+                ".next/",
+                "out/",
+                "build/",
+                ".DS_Store",
+                "*.pem",
+                "coverage/",
+                ".nyc_output/",
+                ".grunt/",
+                "bower_components/",
+                ".lock-wscript",
+                "build/Release",
+                "*.tsbuildinfo",
+                ".npm",
+                ".eslintcache"
+            ]
+        }
+        
+        # Combine patterns
+        patterns = common_patterns + language_patterns.get(language.lower(), [])
+        content = "\n".join(patterns)
+        
+        # Write .gitignore file
+        if shell._is_powershell:
+            write_cmd = f"""
+            Set-Content -Path "{gitignore_path}" -Value @"
+            {content}
+            "@
+            """
+        else:
+            write_cmd = f"""
+            echo '{content}' > "{gitignore_path}"
+            """
+        
+        shell.execute_command(write_cmd)
+        
+    except Exception as e:
+        raise Exception(f"Failed to generate .gitignore: {str(e)}")
+
+def cleanup_project(project_path: str) -> None:
+    """
+    Cleans up temporary files and directories in the project.
+    
+    Args:
+        project_path: Path to the project
+    """
+    try:
+        # Common patterns to clean up
+        patterns = [
+            "**/__pycache__",
+            "**/*.pyc",
+            "**/*.pyo",
+            "**/*.pyd",
+            ".pytest_cache",
+            ".coverage",
+            "htmlcov",
+            "build",
+            "dist",
+            "*.egg-info"
+        ]
+        
+        for pattern in patterns:
+            if shell._is_powershell:
+                clean_cmd = f"""
+                Get-ChildItem -Path "{project_path}" -Include {pattern} -Recurse -Force | Remove-Item -Force -Recurse
+                """
+            else:
+                clean_cmd = f"""
+                find "{project_path}" -type f -name "{pattern}" -exec rm -rf {{}} +
+                """
+            
+            shell.execute_command(clean_cmd)
+            
+    except Exception as e:
+        raise Exception(f"Failed to clean up project: {str(e)}")
 
 if __name__ == '__main__':
     # Test the module
