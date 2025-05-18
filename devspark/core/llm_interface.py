@@ -14,8 +14,11 @@ import json
 import time
 import hashlib
 import typer
+import logging
 from typing import Dict, Optional, Any, Tuple, Callable, List
 from functools import wraps
+import traceback
+import re
 try:
     import google.generativeai as genai
     from google.api_core.exceptions import GoogleAPIError, RetryError, ResourceExhausted, InvalidArgument
@@ -45,6 +48,23 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+# Set up logging
+logger = logging.getLogger("devspark.llm")
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)  # Default level, can be changed via set_log_level()
+
+def set_log_level(level):
+    """Set the logging level for the LLM interface.
+    
+    Args:
+        level: Logging level (e.g., logging.DEBUG, logging.INFO)
+    """
+    logger.setLevel(level)
+    logger.info(f"LLM interface logging level set to {logging.getLevelName(level)}")
 
 # In-memory cache for LLM responses
 _response_cache = {}
@@ -206,37 +226,91 @@ def setup_llm(provider: str = "GOOGLE") -> Tuple[Any, Dict[str, Any]]:
 
 def extract_json_from_llm_response(response_text: str) -> Dict[str, Any]:
     """
-    Extract JSON from LLM response text.
+    Extract JSON object from LLM response text.
     
     Args:
-        response_text: The raw text response from the LLM
+        response_text: Raw text response from LLM
         
     Returns:
-        Parsed JSON as dictionary
-    
-    Raises:
-        json.JSONDecodeError: If JSON parsing fails
+        Extracted JSON object or empty dict if extraction failed
     """
-    text = response_text.strip()
+    if not response_text:
+        return {}
     
-    # Handle markdown code blocks
-    if "```json" in text or "```" in text:
-        parts = text.split("```")
-        for part in parts:
-            if part.strip().startswith("json"):
-                # Extract content after "json" line
-                json_str = part[part.find("json") + 4:].strip()
-            else:
-                json_str = part.strip()
+    # Try to find JSON in response - look for text between ```json and ``` markers
+    json_match = re.search(r'```(?:json)?\s*({[\s\S]+?})\s*```', response_text)
+    if json_match:
+        json_str = json_match.group(1).strip()
+    else:
+        # If no json block markers, try to extract anything that looks like valid JSON
+        json_match = re.search(r'({[\s\S]*})', response_text)
+        if json_match:
+            json_str = json_match.group(1).strip()
+        else:
+            json_str = response_text.strip()
+    
+    # Pre-processing to fix common issues
+    
+    # 1. Fix backtick template literals
+    # Find patterns like "content": `...` and replace with "content": "..."
+    pattern = r'"([^"]+)":\s*`([^`]*)`'
+    
+    def replace_backticks(match):
+        property_name = match.group(1)
+        content = match.group(2)
+        # Escape newlines and quotes
+        content = content.replace('\n', '\\n')
+        content = content.replace('"', '\\"')
+        return f'"{property_name}": "{content}"'
+        
+    json_str = re.sub(pattern, replace_backticks, json_str)
+    
+    # 2. Fix invalid patterns like using string as a key without quotes
+    # Example: ".gitignore": "content" -> "path": ".gitignore", "content": "content"
+    json_str = re.sub(r'["\'](\.[\w]+)["\']:\s*["\'](.*?)["\']', r'"files": [{"path": "\1", "content": "\2"}]', json_str)
+    
+    # 3. Create an old-format structure for compatibility
+    try:
+        # First try to parse the JSON as is
+        result = json.loads(json_str)
+        
+        # If it doesn't have the expected structure with files or directories,
+        # try to create a compatible structure
+        if "files" in result and "directories" in result:
+            # Structure is good
+            # Convert to old format for compatibility
+            directory_structure = []
+            files_to_create = {}
             
-            # Try to parse this part
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError:
-                continue
-    
-    # If no code blocks or parsing failed, try the full text
-    return json.loads(text)
+            # Handle root files
+            for file_info in result.get("files", []):
+                if isinstance(file_info, dict) and "path" in file_info and "content" in file_info:
+                    files_to_create[file_info["path"]] = file_info["content"]
+            
+            # Handle directories and their files
+            for dir_info in result.get("directories", []):
+                if isinstance(dir_info, dict) and "path" in dir_info:
+                    directory_structure.append(dir_info["path"])
+                    
+                    if "files" in dir_info:
+                        for file_info in dir_info["files"]:
+                            if isinstance(file_info, dict) and "path" in file_info and "content" in file_info:
+                                full_path = os.path.join(dir_info["path"], file_info["path"])
+                                files_to_create[full_path] = file_info["content"]
+            
+            # Update result with converted format
+            result["directory_structure"] = directory_structure
+            result["files_to_create"] = files_to_create
+            
+        elif "directory_structure" not in result or "files_to_create" not in result:
+            print("LLM response missing required keys: directory_structure, files_to_create")
+            return {"error": "LLM response format error.", "raw_response": response_text}
+            
+        return result
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse LLM response as JSON: {e}")
+        print(f"LLM Raw Text: {response_text}")
+        return {"error": f"Failed to parse LLM response as JSON: {e}", "raw_response": response_text}
 
 @with_cache(ttl_seconds=3600)  # Cache for 1 hour
 @with_retries(max_retries=3, base_delay=2.0)
@@ -464,6 +538,341 @@ def review_config_file(content: str, file_type: str, provider: str = "GOOGLE") -
         typer.secho(f"ERROR: LLM API config review call failed: {str(e)}", fg=typer.colors.RED)
         return {"error": f"LLM API config review call failed: {str(e)}", "error_type": type(e).__name__}
 
+@with_cache(ttl_seconds=3600)  # Cache for 1 hour
+@with_retries(max_retries=3, base_delay=2.0)
+def get_template_customization(
+    project_details: Dict[str, Any], 
+    template_data: Dict[str, Any],
+    provider: str = "GOOGLE"
+) -> Dict[str, Any]:
+    """
+    Get customized project scaffold suggestions from LLM, starting with an existing template.
+    
+    Args:
+        project_details: Dictionary with project details (name, type, language, etc.)
+        template_data: Dictionary with the template structure to customize
+        provider: LLM provider to use
+        
+    Returns:
+        Dictionary with customized project structure or error
+    """
+    try:
+        model, error = setup_llm(provider)
+        if error:
+            return error
+        
+        # Convert template structure to pretty-printed JSON string
+        template_json = json.dumps(template_data, indent=2)
+        
+        # Prepare prompt for LLM
+        prompt = f"""
+You are an expert software development assistant tasked with customizing project templates.
+
+IMPORTANT INSTRUCTIONS:
+1. You will be given a BASE PROJECT TEMPLATE in JSON format.
+2. You must MODIFY this template based on the project details and description.
+3. Return the COMPLETE, CUSTOMIZED project structure as a JSON object.
+
+The JSON object MUST have these two main keys:
+- "directory_structure": A list of strings, where each string is a relative path for a directory
+- "files_to_create": A JSON object where keys are relative file paths and values are the file contents
+
+PROJECT DETAILS:
+- Name: {project_details.get('name', 'MyProject')}
+- Type: {project_details.get('type', 'Application')}
+- Language: {project_details.get('language', 'JavaScript')}
+- Description: {project_details.get('description', 'A new project')}
+
+BASE PROJECT TEMPLATE:
+```json
+{template_json}
+```
+
+YOUR TASK:
+1. START with the base template structure provided above
+2. ADAPT and EXTEND it to fulfill the specific requirements in the project description
+3. ENSURE all files reference the correct project name: {project_details.get('name', 'MyProject')}
+4. ADD appropriate files/directories based on the project description
+5. MODIFY existing file content to reflect the specific needs
+6. Return ONLY the final JSON object with NO explanations
+
+CONSTRAINTS:
+- Use double quotes for JSON strings, not backticks
+- Format any multi-line content with escaped newlines (\\n)
+- Include ALL necessary directories in the directory_structure
+- Make sure ALL file paths in files_to_create are relative to the project root
+- Your response must be VALID JSON that can be parsed directly
+"""
+        
+        if provider.upper() == "GOOGLE":
+            response = model.generate_content(prompt)
+            response_text = response.text
+        elif provider.upper() == "OPENAI":
+            response = model.chat.completions.create(
+                model="gpt-4-0125-preview",  # Use an appropriate model
+                messages=[
+                    {"role": "system", "content": "You are an expert software developer specializing in project templating."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=4000,
+                temperature=0.1
+            )
+            response_text = response.choices[0].message.content
+        else:
+            return {"error": f"Unsupported provider: {provider}", "error_type": "ValueError"}
+            
+        # Process response
+        results = extract_json_from_llm_response(response_text)
+        
+        # If extraction failed and we have a response, return it for debugging
+        if not results and response_text:
+            return {
+                "error": "Failed to extract valid JSON from LLM response",
+                "error_type": "JSONParseError",
+                "raw_response": response_text
+            }
+            
+        return results
+        
+    except Exception as e:
+        return {
+            "error": f"LLM interface error: {str(e)}",
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }
+
+@with_cache(ttl_seconds=3600)  # Cache for 1 hour
+@with_retries(max_retries=3, base_delay=2.0)
+def get_ai_customized_template(
+    project_details: Dict[str, Any], 
+    template_data: Dict[str, Any],
+    provider: str = "GOOGLE"
+) -> Dict[str, Any]:
+    """
+    Get AI-enhanced customization for project templates based on detailed user requirements.
+    
+    Args:
+        project_details: Dictionary with project details (name, type, language, etc.) and ai_customization_description
+        template_data: Dictionary with the template structure to customize
+        provider: LLM provider to use
+        
+    Returns:
+        Dictionary with AI-customized project structure or error
+    """
+    try:
+        logger.info(f"Starting AI template customization for project '{project_details.get('name', 'unnamed')}'")
+        logger.debug(f"Project details: {json.dumps(project_details, indent=2)}")
+        
+        model, error = setup_llm(provider)
+        if error:
+            logger.error(f"Failed to set up LLM: {error}")
+            return error
+        
+        # Convert template structure to pretty-printed JSON string
+        template_json = json.dumps(template_data, indent=2)
+        
+        # Get the AI customization description from project details
+        customization_description = project_details.get('ai_customization_description', "")
+        logger.info(f"Customization description: {customization_description}")
+        
+        # Extract other project details
+        project_name = project_details.get('name', 'MyProject')
+        project_type = project_details.get('type', 'Application')
+        project_language = project_details.get('language', 'Python')
+        project_description = project_details.get('description', 'A new project')
+        
+        # Get additional template-specific parameters
+        api_prefix = project_details.get('api_prefix', None)
+        resource_name = project_details.get('resource_name', None)
+        author_name = project_details.get('author_name', None)
+        python_version = project_details.get('python_version', None)
+        # Node.js specific parameters
+        api_base_path = project_details.get('api_base_path', None)
+        main_resource_name = project_details.get('main_resource_name', None)
+        node_version = project_details.get('node_version', None)
+        
+        # Determine if this is a database integration request
+        is_database_request = any(term in customization_description.lower() 
+                                 for term in ['database', 'db', 'sqlalchemy', 'sql', 'mongo', 'mongoose', 'orm'])
+        
+        if is_database_request:
+            logger.info("Database integration request detected")
+            
+        # Prepare a more detailed prompt for LLM
+        prompt = f"""
+You are an expert software development assistant.
+You will be given a base project template in JSON string format and a description of desired customizations.
+Your task is to take the base template, apply the customizations, and return the COMPLETE, MODIFIED project structure as a JSON object.
+This JSON object must strictly adhere to the following format:
+{{
+  "directory_structure": ["list", "of", "relative/paths/to/create"],
+  "files_to_create": {{
+    "relative/path/to/file1.py": "content of file1...",
+    "relative/path/to/another_file.md": "content for another file..."
+  }}
+}}
+Ensure all file content is properly escaped for JSON string values (e.g., newlines as \\n, quotes as \\").
+
+Base Project Template (JSON string):
+```json
+{template_json}
+```
+
+Project Details and Desired Customizations:
+Project Name: {project_name}
+Project Type: {project_type}
+Main Language: {project_language}
+Project Description: {project_description}
+"""
+
+        # Add template-specific parameters if they exist
+        if api_prefix:
+            prompt += f"API Prefix: {api_prefix}\n"
+        if resource_name:
+            prompt += f"Resource Name: {resource_name}\n"
+        if author_name:
+            prompt += f"Author: {author_name}\n"
+        if python_version:
+            prompt += f"Python Version: {python_version}\n"
+        if api_base_path:
+            prompt += f"API Base Path: {api_base_path}\n"
+        if main_resource_name:
+            prompt += f"Main Resource Name: {main_resource_name}\n"
+        if node_version:
+            prompt += f"Node.js Version: {node_version}\n"
+
+        # Add the customization description
+        prompt += f"""
+Specific Customizations Requested: {customization_description}
+
+IMPORTANT INSTRUCTIONS:
+1. Make ONLY the changes specified in the customization description
+2. Keep the rest of the template structure intact
+3. Maintain consistency with the existing file naming and code style
+"""
+
+        # Add language-specific instructions
+        if project_language.lower() == "python":
+            prompt += """
+4. For Python Flask API templates:
+   - Properly update imports when adding new files
+   - Register new blueprints in the app/__init__.py file if needed
+   - Maintain RESTful API patterns for any new endpoints
+"""
+        elif project_language.lower() == "node.js":
+            prompt += """
+4. For Node.js Express API templates:
+   - Properly update imports/requires when adding new files
+   - Register new routes in the appropriate route files
+   - Maintain RESTful API patterns for any new endpoints
+   - Update package.json dependencies as needed
+"""
+
+        # Add database-specific instructions if this is a database integration request
+        if is_database_request:
+            prompt += """
+5. For database integration requests:
+"""
+            if project_language.lower() == "python":
+                prompt += """
+   - Add appropriate database dependencies in requirements.txt
+   - Create a database extension/configuration file (e.g., app/extensions.py)
+   - Add proper model definitions with SQLAlchemy classes
+   - Update services to use the models for CRUD operations
+   - Add database connection configuration to app/__init__.py
+   - Include environment variables for database connection in .env.example
+   - Add migration setup if using Flask-Migrate/Alembic
+   - Ensure proper error handling for database operations
+"""
+            elif project_language.lower() == "node.js":
+                prompt += """
+   - Add appropriate database dependencies in package.json
+   - Create a database configuration file (e.g., src/config/db.js)
+   - Add proper model definitions (Mongoose schemas for MongoDB)
+   - Update services to use the models for CRUD operations
+   - Connect to the database in the main application file
+   - Include environment variables for database connection in .env.example
+   - Ensure proper error handling for database operations
+"""
+        
+        # Final instructions
+        prompt += """
+6. Make sure your output is properly formatted JSON with escaped quotes and newlines
+
+Please provide ONLY the complete, customized JSON object output representing the new project structure.
+Do not add any explanatory text before or after the JSON object.
+"""
+
+        # Log the prompt for debugging
+        typer.echo("\n--- Sending AI Customization Prompt to LLM ---")
+        logger.debug(f"LLM Prompt:\n{prompt}")
+        
+        # Make API call
+        logger.info(f"Sending request to {provider} LLM")
+        
+        if provider.upper() == "GOOGLE":
+            response = model.generate_content(prompt)
+            response_text = response.text
+        elif provider.upper() == "OPENAI":
+            response = model.chat.completions.create(
+                model="gpt-4-0125-preview",  # Use an appropriate model
+                messages=[
+                    {"role": "system", "content": "You are an expert software developer specializing in project templating."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=4000,
+                temperature=0.1
+            )
+            response_text = response.choices[0].message.content
+        else:
+            logger.error(f"Unsupported provider: {provider}")
+            return {"error": f"Unsupported provider: {provider}", "error_type": "ValueError"}
+        
+        typer.echo("--- Received response from LLM ---")
+        logger.info("Response received from LLM")
+        logger.debug(f"Raw LLM Response:\n{response_text}")
+        
+        # Process response
+        logger.info("Extracting JSON from LLM response")
+        results = extract_json_from_llm_response(response_text)
+        
+        # If extraction failed and we have a response, return it for debugging
+        if not results and response_text:
+            logger.error("Failed to extract valid JSON from LLM response")
+            return {
+                "error": "Failed to extract valid JSON from LLM response",
+                "error_type": "JSONParseError",
+                "raw_response": response_text
+            }
+        
+        # Validate that the results have the required structure
+        if "directory_structure" not in results and "files_to_create" not in results:
+            if "files" in results and "directories" in results:
+                # The response is in the new template format
+                logger.info("LLM response uses new template format, converting")
+                typer.echo("LLM response uses new template format, which is compatible")
+            else:
+                logger.error("LLM response doesn't have the expected structure")
+                typer.secho("LLM response doesn't have the expected structure", fg=typer.colors.YELLOW)
+                typer.echo("Raw LLM Response: \n" + response_text)
+                return {
+                    "error": "LLM response missing required keys: directory_structure and/or files_to_create",
+                    "error_type": "InvalidStructure",
+                    "raw_response": response_text
+                }
+        
+        logger.info("Successfully processed LLM response")
+        logger.debug(f"Generated {len(results.get('files_to_create', {}))} files and {len(results.get('directory_structure', []))} directories")
+        return results
+        
+    except Exception as e:
+        logger.exception(f"Error in AI template customization: {str(e)}")
+        return {
+            "error": f"LLM interface error: {str(e)}",
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }
+
 if __name__ == '__main__':
     # This block is for testing this module directly.
     # Ensure you have a .env file in the project root with GOOGLE_API_KEY.
@@ -495,6 +904,57 @@ if __name__ == '__main__':
     else:
         print("\nConfig Review (from LLM if successful, or placeholder):")
         print(json.dumps(review, indent=2))
+    
+    print("\n--- Testing AI Template Customization with Database Integration ---")
+    # Test Flask SQLAlchemy Integration
+    db_flask_project = {
+        "name": "FlaskSQLAPI",
+        "type": "API",
+        "language": "Python",
+        "description": "Flask API with SQLAlchemy database",
+        "api_prefix": "api/v1",
+        "resource_name": "user",
+        "author_name": "Test Author",
+        "python_version": "3.9",
+        "ai_customization_description": "Add SQLAlchemy integration with a User model"
+    }
+    
+    # Test MongoDB Integration
+    db_node_project = {
+        "name": "MongoExpressAPI",
+        "type": "API",
+        "language": "Node.js",
+        "description": "Express API with MongoDB",
+        "api_base_path": "/api/v1",
+        "main_resource_name": "user",
+        "author_name": "Test Author",
+        "node_version": "18.x",
+        "ai_customization_description": "Add MongoDB database connection with Mongoose"
+    }
+    
+    # Load a template to test with
+    try:
+        template_path = os.path.join(os.path.dirname(__file__), '..', 'templates', 'python_flask_api.json')
+        with open(template_path, 'r') as f:
+            template_data = json.load(f)
+        
+        # Test if database integration detection works
+        model, _ = setup_llm()
+        if model:  # Only try this if we have a valid API key
+            print("Testing if database integration detection is working...")
+            print(f"Flask SQLAlchemy request detected: {any(term in db_flask_project['ai_customization_description'].lower() for term in ['database', 'db', 'sqlalchemy', 'sql', 'mongo', 'mongoose', 'orm'])}")
+            print(f"MongoDB request detected: {any(term in db_node_project['ai_customization_description'].lower() for term in ['database', 'db', 'sqlalchemy', 'sql', 'mongo', 'mongoose', 'orm'])}")
+            
+            # Uncomment to test the actual LLM call
+            # print("Sending request to LLM (uncomment to test with real API call)...")
+            # customization = get_ai_customized_template(db_flask_project, template_data)
+            # if "error" in customization:
+            #     print(f"Error in customization: {customization['error']}")
+            # else:
+            #     print("Successfully generated customized template with database integration")
+            #     print(f"Files to create: {len(customization.get('files_to_create', {}))}")
+    except Exception as e:
+        print(f"Error testing database integration: {str(e)}")
         
     # Test cache
     print("\n--- Testing Cache ---")
