@@ -12,6 +12,9 @@ class ShellHelper:
         self._shell = os.environ.get('SHELL', '')
         if self._system == 'windows':
             self._shell = os.environ.get('COMSPEC', 'cmd.exe')
+        # Set Windows platform flag
+        self._is_windows = self._system == 'windows'
+        # Shell-specific flags
         self._is_powershell = 'powershell' in self._shell.lower()
         self._is_cmd = 'cmd' in self._shell.lower()
         self._is_bash = 'bash' in self._shell.lower() or 'sh' in self._shell.lower()
